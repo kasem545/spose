@@ -3,72 +3,96 @@
 import sys
 import argparse
 import urllib.request
+import socket
 from colorama import Fore, Style, init
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
+from url_request import URLRequest  # Ensure this is in the same directory
 
-# Initialize colorama for color support
 init(autoreset=True)
 
 class Spose:
     def __init__(self):
         parser = argparse.ArgumentParser(
-            add_help=True,
-            description='Squid Pivoting Open Port Scanner'
+            description='Squid Proxy Port Scanner with Threading and Banner Grabbing'
         )
-        parser.add_argument("--proxy", help="Define proxy address URL (http://x.x.x.x:3128)",
-                            action="store", dest='proxy', required=True)
-        parser.add_argument("--target", help="Define target IP behind proxy",
-                            action="store", dest='target', required=True)
-        parser.add_argument("--ports", help="[Optional] Define target ports behind proxy (comma-separated)",
-                            action="store", dest='ports')
-        parser.add_argument("--allports", help="[Optional] Scan all 65535 TCP ports behind proxy",
-                            action="store_true", dest='allports')
-        
+        parser.add_argument("--proxy", help="Proxy address (e.g. http://127.0.0.1:3128)",
+                            required=True)
+        parser.add_argument("--target", help="Target IP behind the proxy",
+                            required=True)
+        parser.add_argument("--ports", help="Comma-separated ports to scan (default: top ports)")
+        parser.add_argument("--allports", help="Scan all 65535 ports",
+                            action="store_true")
+        parser.add_argument("--threads", help="Concurrent threads (default: 50)",
+                            type=int, default=50)
+
         if len(sys.argv) == 1:
             parser.print_help()
             sys.exit(1)
-        
-        options = parser.parse_args()
 
-        target = options.target
-        proxy = options.proxy
+        args = parser.parse_args()
 
-        # Determine the list of ports to scan
-        if options.allports:
-            ports = range(1, 65536)  # All TCP ports
-            print(f"{Fore.YELLOW}Scanning all 65,535 TCP ports{Style.RESET_ALL}")
-        elif options.ports:
-            ports = [int(port.strip()) for port in options.ports.split(",")]
-            print(f"{Fore.YELLOW}Scanning specified ports: {options.ports}{Style.RESET_ALL}")
+        self.target = args.target
+        self.proxy = args.proxy
+        self.threads = args.threads
+
+        if args.allports:
+            self.ports = range(1, 65536)
+            print(f"{Fore.YELLOW}Scanning all 65,535 ports...{Style.RESET_ALL}")
+        elif args.ports:
+            self.ports = [int(p.strip()) for p in args.ports.split(',')]
+            print(f"{Fore.YELLOW}Scanning specified ports: {args.ports}{Style.RESET_ALL}")
         else:
-            ports = [21, 22, 23, 25, 53, 69, 80, 109, 110, 123, 137, 138, 139, 143, 156, 389, 443,
-                     546, 547, 995, 993, 2086, 2087, 2082, 2083, 3306, 8080, 8443, 10000]
-            print(f"{Fore.YELLOW}Scanning default common ports{Style.RESET_ALL}")
+            self.ports = [21, 22, 23, 25, 53, 69, 80, 110, 143, 443,
+                          993, 995, 3306, 3389, 8080, 8443, 10000]
+            print(f"{Fore.YELLOW}Scanning default common ports...{Style.RESET_ALL}")
 
-        print(f"{Fore.CYAN}Using proxy address {proxy}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Using proxy: {self.proxy}{Style.RESET_ALL}")
+        self.scan_ports()
 
-        # Set up proxy
-        proxy_handler = urllib.request.ProxyHandler({'http': proxy})
-        opener = urllib.request.build_opener(proxy_handler)
-        urllib.request.install_opener(opener)
+    def scan_ports(self):
+        with ThreadPoolExecutor(max_workers=self.threads) as executor:
+            futures = [executor.submit(self.check_port, port) for port in self.ports]
+            for future in as_completed(futures):
+                future.result()
 
-        # Scan the ports
-        for port in ports:
-            try:
-                url = f"http://{target}:{port}"
-                with urllib.request.urlopen(url) as response:
-                    code = response.getcode()
-                    if code in [200, 404, 401]:
-                        print(f"{Fore.GREEN}{target}:{port} seems OPEN{Style.RESET_ALL}")
-            except urllib.error.HTTPError as e:
-                # Suppress output for HTTP errors
-                if e.code in [503]:
-                    continue
-            except urllib.error.URLError:
-                # Suppress output for URL errors
-                continue
-            except Exception:
-                # Suppress output for all other exceptions
-                continue
+    def check_port(self, port):
+        try:
+            banner = self.grab_banner(port)
+            if banner:
+                print(f"{Fore.GREEN}[OPEN] {self.target}:{port}{Style.RESET_ALL}")
+                print(f"{Fore.MAGENTA} └─ Banner: {banner.strip()}{Style.RESET_ALL}")
+        except Exception as e:
+            # Optional: uncomment to debug individual failures
+            # print(f"[DEBUG] Port {port} error: {e}")
+            pass
+
+    def grab_banner(self, port):
+        try:
+            parsed = urlparse(self.proxy)
+            proxy_host = parsed.hostname
+            proxy_port = parsed.port
+
+            with socket.create_connection((proxy_host, proxy_port), timeout=5) as proxy_sock:
+                # Step 1: CONNECT
+                connect_payload = f"CONNECT {self.target}:{port} HTTP/1.1\r\nHost: {self.target}:{port}\r\n\r\n"
+                proxy_sock.sendall(connect_payload.encode())
+                response = proxy_sock.recv(4096)
+
+                if b"200 Connection established" not in response:
+                    return None  # Proxy failed to connect
+
+                # Step 2: Send a probe (default = HTTP HEAD)
+                proxy_sock.settimeout(3)
+                probe = b"HEAD / HTTP/1.1\r\nHost: %b\r\nConnection: close\r\n\r\n" % self.target.encode()
+                proxy_sock.sendall(probe)
+
+                banner = proxy_sock.recv(4096)
+                if banner:
+                    return banner.decode(errors='ignore').split('\r\n')[0]
+        except Exception:
+            return None
+
 
 if __name__ == "__main__":
     Spose()
