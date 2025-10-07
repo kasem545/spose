@@ -16,7 +16,7 @@ Detect open ports on internal hosts *through a Squid HTTP proxy*. Useful for **C
 
 ---
 
-## 🚀 Install & Usage
+## 🚀 Usage
 
 ```bash
 ❯ python3 ./spose.py --help
